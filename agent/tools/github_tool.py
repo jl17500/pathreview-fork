@@ -1,5 +1,7 @@
 """GitHub repository metadata tool."""
 
+from urllib.parse import quote
+
 import httpx
 import structlog
 
@@ -82,6 +84,10 @@ class GitHubTool(BaseTool):
 
         repo_json = response.json()
 
+        file_structure = self._fetch_file_structure(
+            username, repo_name, repo_json.get("default_branch")
+        )
+
         # Extract metadata, handling null values
         metadata = {
             "name": repo_json.get("name", ""),
@@ -94,6 +100,7 @@ class GitHubTool(BaseTool):
             "has_readme": self._has_readme(username, repo_name),
             "topics": repo_json.get("topics", []),
             "homepage": repo_json.get("homepage") or "",
+            "file_structure": file_structure,
         }
 
         logger.info(
@@ -105,6 +112,49 @@ class GitHubTool(BaseTool):
         )
 
         return metadata
+
+    def _fetch_file_structure(
+        self, username: str, repo_name: str, default_branch: str | None
+    ) -> list[str]:
+        """Fetch every repository path on the default branch.
+
+        Args:
+            username: GitHub username
+            repo_name: Repository name
+            default_branch: Default branch name from the repository metadata
+
+        Returns:
+            Repository-relative paths (files and directories)
+
+        Raises:
+            ValueError: If the branch is unusable or the tree is malformed or truncated
+        """
+        if not isinstance(default_branch, str) or not default_branch:
+            raise ValueError("Repository has no usable default branch")
+
+        ref = quote(default_branch, safe="")
+        url = f"{self.base_url}/repos/{username}/{repo_name}/git/trees/{ref}"
+
+        headers = {}
+        if self.api_token:
+            headers["Authorization"] = f"token {self.api_token}"
+
+        response = httpx.get(url, headers=headers, params={"recursive": "1"}, timeout=10.0)
+        response.raise_for_status()
+
+        tree_json = response.json()
+        if not isinstance(tree_json, dict) or not isinstance(tree_json.get("tree"), list):
+            raise ValueError("Malformed GitHub tree response")
+        if tree_json.get("truncated") is not False:
+            raise ValueError("GitHub tree response was truncated or incomplete")
+
+        paths = []
+        for entry in tree_json["tree"]:
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if not isinstance(path, str) or not path:
+                raise ValueError("Malformed GitHub tree entry")
+            paths.append(path)
+        return paths
 
     def _has_readme(self, username: str, repo_name: str) -> bool:
         """Check if repository has a README file.
